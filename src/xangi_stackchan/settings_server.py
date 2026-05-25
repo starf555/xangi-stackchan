@@ -5,6 +5,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
 
+import requests
+
 from .dance import PRESETS as DANCE_PRESETS, run_demo as run_dance_demo
 from .settings import RuntimeState
 
@@ -333,6 +335,23 @@ def make_handler(state: RuntimeState):
                 self.send_response(303)
                 self.send_header("Location", "/")
                 self.end_headers()
+                return
+            if self.path == "/voice-input":
+                payload = json.loads(raw.decode("utf-8") or "{}")
+                text = payload.get("text", "").strip()
+                if not text:
+                    self._send(400, b"text required", "text/plain; charset=utf-8")
+                    return
+                xangi_url = state.snapshot_dict().get("xangi_url", "http://127.0.0.1:18888")
+                try:
+                    resp = requests.post(
+                        xangi_url.rstrip("/") + "/api/chat",
+                        json={"message": text},
+                        timeout=10,
+                    )
+                    self._send(resp.status_code, resp.content, "application/json; charset=utf-8")
+                except Exception as exc:
+                    self._send(502, str(exc).encode(), "text/plain; charset=utf-8")
                 return
             self._send(404, b"not found", "text/plain; charset=utf-8")
 

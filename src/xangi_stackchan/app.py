@@ -1,6 +1,8 @@
 import argparse
 import json
+import os
 import random
+import subprocess
 import threading
 from pathlib import Path
 import sys
@@ -32,6 +34,10 @@ from .tts import (
 
 
 DEFAULT_XANGI_URL = "http://127.0.0.1:18888"
+DISCORD_LOG_CHANNEL_ID = "1543164763855654912"
+XANGI_CLI_JS = Path(
+    os.environ.get("XANGI_CMD_JS", str(Path.home() / "xangi" / "dist" / "cli" / "xangi-cmd.js"))
+)
 
 
 class ConfigChanged(Exception):
@@ -40,6 +46,57 @@ class ConfigChanged(Exception):
 
 def log(payload: dict):
     print(json.dumps(payload, ensure_ascii=False), file=sys.stderr, flush=True)
+
+
+def post_discord_log(message: str):
+    text = (message or "").strip()
+    if not text:
+        return
+
+    def _worker():
+        try:
+            result = subprocess.run(
+                [
+                    "node",
+                    str(XANGI_CLI_JS),
+                    "discord_send",
+                    "--channel",
+                    DISCORD_LOG_CHANNEL_ID,
+                    "--message",
+                    text,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=True,
+            )
+            if result.stdout.strip():
+                log({"discord_log": "sent", "message": text})
+        except Exception as exc:
+            log({"discord_log_error": str(exc), "message": text})
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
+def supports_move(backend) -> bool:
+    return getattr(backend, "supports_move", True)
+
+
+def effective_serial_params(config: BridgeConfig) -> tuple[int, float]:
+    chunk_size = config.serial_chunk
+    chunk_delay = config.serial_delay
+    if (config.stackchan.device_profile or "") == "atoms3r":
+        if chunk_size == 1024:
+            chunk_size = 512
+        if abs(chunk_delay - 0.005) < 1e-9:
+            chunk_delay = 0.01
+    return chunk_size, chunk_delay
+
+
+def effective_split_len(config: BridgeConfig) -> int:
+    if (config.stackchan.device_profile or "") == "atoms3r":
+        return 8
+    return 80
 
 
 def set_face_if_needed(backend, expression: str, current_face: list[str | None]):
@@ -64,10 +121,13 @@ def set_move_if_needed(backend, yaw: float, pitch: float, current_move: list[flo
     value very close to the previous one.
     """
     if (
+        not supports_move(backend)
+        or (
         current_move[0] is not None
         and current_move[1] is not None
         and abs(current_move[0] - yaw) < 0.5
         and abs(current_move[1] - pitch) < 0.5
+        )
     ):
         return True
     try:
@@ -162,14 +222,16 @@ def synthesize_chunks(chunks: list[str], config: BridgeConfig, piper_process: Pi
         yield idx, chunk, wav, time.time() - started
 
 
-def speak_text(backend, text: str, config: BridgeConfig, piper_process: PiperProcess | None):
+def speak_text(backend, text: str, config: BridgeConfig, piper_process: PiperProcess | None) -> bool:
     text = (text or "").strip()
     if not text or config.tts == "none":
-        return
+        return False
 
-    chunks = split_text(text)
+    chunks = split_text(text, max_len=effective_split_len(config))
     log({"speaking_chunks": len(chunks)})
     wav_queue: Queue = Queue(maxsize=4)
+    spoke_any = False
+    chunk_size, chunk_delay = effective_serial_params(config)
 
     def tts_worker():
         try:
@@ -193,7 +255,7 @@ def speak_text(backend, text: str, config: BridgeConfig, piper_process: PiperPro
         idx, chunk, wav, tts_time = item
         started = time.time()
         try:
-            result = backend.send_wav(wav, chunk_size=config.serial_chunk, chunk_delay=config.serial_delay)
+            result = backend.send_wav(wav, chunk_size=chunk_size, chunk_delay=chunk_delay)
         except Exception as exc:
             result = {"status": "error", "error": str(exc)}
         log(
@@ -204,19 +266,51 @@ def speak_text(backend, text: str, config: BridgeConfig, piper_process: PiperPro
                 "tts_seconds": round(tts_time, 2),
                 "send_seconds": round(time.time() - started, 2),
                 "bytes": len(wav),
+                "serial_chunk": chunk_size,
+                "serial_delay": chunk_delay,
                 "result": result,
             }
         )
+        if result.get("status") == "ok":
+            spoke_any = True
 
     executor.shutdown(wait=False)
+    return spoke_any
 
 
-def open_backend_with_retry(config: BridgeConfig):
+def open_backend_with_retry(config: BridgeConfig, xangi_url: str = ""):
     while True:
         apply_profile_defaults(config.stackchan)
         backend = create_backend(config.stackchan)
+        # USB シリアルモードのとき: デバイスから VOICE_INPUT を受信して xangi に転送
+        if not config.stackchan.wifi and hasattr(backend, "voice_input_callback") and xangi_url:
+            import requests as _req
+            def _on_voice_input(text: str):
+                log({"voice_input": text})
+                post_discord_log(f"IN: {text}")
+                try:
+                    _req.post(
+                        xangi_url.rstrip("/") + "/api/chat",
+                        json={"message": text},
+                        timeout=(5, 2),
+                    )
+                except _req.exceptions.ReadTimeout:
+                    pass  # xangi は受信済 (レスポンスを待たない)
+                except Exception as exc:
+                    log({"voice_input_error": str(exc)})
+            backend.voice_input_callback = _on_voice_input
         try:
             backend.open()
+            try:
+                status = backend.send_command("STATUS")
+                if isinstance(status, dict) and status.get("servo") is False:
+                    backend.supports_move = False
+                else:
+                    backend.supports_move = True
+                log({"status": status})
+            except Exception as exc:
+                backend.supports_move = True
+                log({"status_error": str(exc)})
             log({"stackchan": "connected", "wifi": config.stackchan.wifi})
             return backend
         except KeyboardInterrupt:
@@ -267,7 +361,7 @@ def run_bridge(state: RuntimeState):
             if version != active_version:
                 close_runtime(backend, piper_process, current_face, current_move, config)
                 state.set_runtime(None, None)
-                backend = open_backend_with_retry(config)
+                backend = open_backend_with_retry(config, xangi_url=config.xangi_url)
                 piper_process = None
                 if config.tts == "piper":
                     piper_process = PiperProcess(config.piper_bin, config.piper_model, config.piper_speaker)
@@ -331,7 +425,9 @@ def run_bridge(state: RuntimeState):
                                 set_face_if_needed(backend, config.face_talking, current_face)
                         elif event_type == "turn.complete":
                             active_turn = None
+                            post_discord_log(f"Stackchan: {event.get('text', '')}")
                             set_face_if_needed(backend, config.face_talking, current_face)
+                            spoke = False
                             if config.move_enabled:
                                 with TalkingSway(
                                     backend,
@@ -342,11 +438,11 @@ def run_bridge(state: RuntimeState):
                                     config.move_talking_sway_interval,
                                     current_move,
                                 ):
-                                    speak_text(
+                                    spoke = speak_text(
                                         backend, event.get("text", ""), config, piper_process
                                     )
                             else:
-                                speak_text(backend, event.get("text", ""), config, piper_process)
+                                spoke = speak_text(backend, event.get("text", ""), config, piper_process)
                             set_face_if_needed(backend, config.face_idle, current_face)
                             if config.move_enabled:
                                 set_move_if_needed(

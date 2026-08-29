@@ -105,10 +105,13 @@ def detect_serial_port() -> str:
 class StackchanSerial:
     """USB serial backend for stackchan family devices (K151 / stackchan-atama)."""
 
-    def __init__(self, port: str, baud: int = DEFAULT_BAUD):
+    def __init__(self, port: str, baud: int = DEFAULT_BAUD, voice_input_callback=None):
         self.port = port
         self.baud = baud
         self.ser = None
+        # デバイスから VOICE_INPUT:<text> を受信したときに呼ぶコールバック
+        self.voice_input_callback = voice_input_callback
+        self._reader_running = False
         # シリアルバスは USB 1 本の共有資源。WAV 転送中に MOVE/FACE/VOLUME などの
         # テキストコマンドが割り込むと WAV データに ASCII バイト列が混入し、
         # playWav 失敗・no READY response・ノイズ再生を引き起こす。RLock で
@@ -134,10 +137,50 @@ class StackchanSerial:
         self.ser = serial.Serial(self.port, self.baud, timeout=5)
         time.sleep(0.5)
         self.drain()
+        # VOICE_INPUT バックグラウンドリーダー起動
+        if self.voice_input_callback:
+            self._reader_running = True
+            t = threading.Thread(target=self._voice_input_reader, daemon=True)
+            t.start()
 
     def close(self):
+        self._reader_running = False
         if self.ser and self.ser.is_open:
             self.ser.close()
+
+    def _voice_input_reader(self):
+        """デバイスから VOICE_INPUT:<text> 行を受信して voice_input_callback を呼ぶ。"""
+        buf = b""
+        while self._reader_running:
+            try:
+                # ロックが空いている間だけ読む（send_wav/send_command と競合しない）
+                acquired = self._lock.acquire(blocking=False)
+                if acquired:
+                    try:
+                        if self.ser and self.ser.in_waiting:
+                            chunk = self.ser.read(min(self.ser.in_waiting, 512))
+                            buf += chunk
+                    finally:
+                        self._lock.release()
+
+                # バッファから行を処理（ロック外）
+                while b"\n" in buf:
+                    line_bytes, buf = buf.split(b"\n", 1)
+                    line = line_bytes.decode("utf-8", errors="replace").strip()
+                    if line.startswith("VOICE_INPUT:"):
+                        text = line[len("VOICE_INPUT:"):]
+                        if text and self.voice_input_callback:
+                            # ブロックしないよう別スレッドで実行
+                            threading.Thread(
+                                target=self.voice_input_callback,
+                                args=(text,),
+                                daemon=True,
+                            ).start()
+                    elif line:
+                        self._detect_async_event(line)
+            except Exception:
+                pass
+            time.sleep(0.05)
 
     def drain(self):
         # 単に捨てるのではなく、行単位で読んで非同期 event 行 (audio_stopped 等) を
@@ -296,7 +339,7 @@ class StackchanSerial:
         # \n まで block するので、in_waiting で来た分だけ読んで自前で行分割
         # する (デバイス側が大量のデバッグログを流す場合に readline ブロックで
         # deadline を越えてしまう問題への対策)。
-        deadline = time.time() + 10
+        deadline = time.time() + 35
         buf = b""
         while time.time() < deadline:
             avail = self.ser.in_waiting
@@ -306,6 +349,8 @@ class StackchanSerial:
                     raw_line, buf = buf.split(b"\n", 1)
                     line = raw_line.decode("utf-8", errors="replace").strip()
                     if not line.startswith("{"):
+                        if line:
+                            print(f"FW_DBG: {line}", flush=True)
                         continue
                     try:
                         parsed = json.loads(line)

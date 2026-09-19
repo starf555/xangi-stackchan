@@ -34,6 +34,42 @@ DEFAULT_PIPER_LENGTH_SCALE = os.environ.get("PIPER_LENGTH_SCALE", "1.5")
 DEFAULT_PIPER_NOISE_SCALE = os.environ.get("PIPER_NOISE_SCALE", "0.667")
 
 
+_LATIN_LETTER_READINGS = {
+    "A": "エー", "B": "ビー", "C": "シー", "D": "ディー", "E": "イー",
+    "F": "エフ", "G": "ジー", "H": "エイチ", "I": "アイ", "J": "ジェイ",
+    "K": "ケー", "L": "エル", "M": "エム", "N": "エヌ", "O": "オー",
+    "P": "ピー", "Q": "キュー", "R": "アール", "S": "エス", "T": "ティー",
+    "U": "ユー", "V": "ブイ", "W": "ダブリュー", "X": "エックス", "Y": "ワイ",
+    "Z": "ゼット",
+}
+
+
+def normalize_speech_text(text: str) -> str:
+    """Make common chat formatting and abbreviations speakable in Japanese.
+
+    This is deliberately used only for TTS.  The original assistant response
+    remains available in the UI and Discord transcript.
+    """
+    text = str(text or "")
+    # Markdown links should speak their label, not an opaque URL.
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"https?://\S+", "", text)
+    text = re.sub(r"[`*_#]", "", text)
+    text = re.sub(r"(?m)^\s*[-*+]\s+", "", text)
+    # Japanese event dates are often written as 9/20.  Read the separator as
+    # a date only between one- or two-digit numbers.
+    text = re.sub(r"(?<!\d)(\d{1,2})/(\d{1,2})(?!\d)", r"\1月\2日", text)
+
+    def read_acronym(match: re.Match[str]) -> str:
+        return "".join(_LATIN_LETTER_READINGS[letter] for letter in match.group())
+
+    # Acronyms such as NT, URL, and ABC are commonly skipped or pronounced
+    # poorly by Japanese voices.  Keep ordinary lowercase English intact.
+    text = re.sub(r"(?<![A-Za-z])[A-Z]{2,8}(?![A-Za-z])", read_acronym, text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
 def split_text(text: str, max_len: int = 80) -> list[str]:
     parts = re.findall(r"[^。！？!?\.]+[。！？!?\.]?", text.strip())
     chunks: list[str] = []

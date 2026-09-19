@@ -26,6 +26,7 @@ from .tts import (
     DEFAULT_VOICEVOX_SPEAKER,
     DEFAULT_VOICEVOX_URL,
     PiperProcess,
+    normalize_speech_text,
     split_text,
     voicevox_synthesize,
 )
@@ -259,7 +260,7 @@ def synthesize_chunks(chunks: list[str], config: BridgeConfig, piper_process: Pi
 
 
 def speak_text(backend, text: str, config: BridgeConfig, piper_process: PiperProcess | None) -> bool:
-    text = (text or "").strip()
+    text = normalize_speech_text(text)
     if not text or config.tts == "none":
         return False
 

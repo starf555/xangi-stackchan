@@ -74,6 +74,36 @@ def test_atoms3r_profile():
     assert p["capabilities"]["servo"] is False
 
 
+def test_atoms3r_uses_larger_but_safe_tts_chunks():
+    from xangi_stackchan.app import effective_split_len
+    from xangi_stackchan.app_types import BridgeConfig
+
+    cfg = BridgeConfig(
+        xangi_url="http://127.0.0.1:18888",
+        thread_id=None,
+        stackchan=StackchanConfig(device_profile="atoms3r"),
+        volume=120,
+        tts="none",
+        piper_bin="",
+        piper_model="",
+        piper_speaker=0,
+        voicevox_url="",
+        voicevox_speaker=0,
+        serial_chunk=1024,
+        serial_delay=0.005,
+        stackchan_retry_seconds=3.0,
+        face_idle="neutral",
+        face_thinking="doubt",
+        face_talking="happy",
+        face_error="sad",
+        stream_timeout=65,
+        retry_seconds=1.0,
+        max_retry_seconds=30.0,
+    )
+
+    assert effective_split_len(cfg) == 24
+
+
 def test_rt_beta_has_skip_move_during_wav():
     p = resolve_profile("rt_beta")
     assert p.get("skip_move_during_wav") is True

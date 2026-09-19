@@ -128,7 +128,10 @@ def effective_serial_params(config: BridgeConfig) -> tuple[int, float]:
 
 def effective_split_len(config: BridgeConfig) -> int:
     if (config.stackchan.device_profile or "") == "atoms3r":
-        return 8
+        # Piper の 24 文字程度の日本語 WAV は実機で約 189KB で、
+        # atoms3r の 256KB プロファイル上限に収まる。以前の 8 文字は
+        # 長い返答を多数の短い再生へ分割してキュー滞留を招いていた。
+        return 24
     return 80
 
 

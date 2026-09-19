@@ -37,6 +37,7 @@ def _select(name: str, label: str, value: str, options: list[str]) -> str:
 def render_page(state: RuntimeState) -> str:
     cfg = state.snapshot_dict()
     checked = " checked" if cfg.get("wifi") else ""
+    stream_tts_checked = " checked" if cfg.get("stream_tts") else ""
     move_checked = " checked" if cfg.get("move_enabled") else ""
     return f"""<!doctype html>
 <html lang="ja">
@@ -84,6 +85,7 @@ def render_page(state: RuntimeState) -> str:
       {_field("piper_model", "piper model", cfg["piper_model"])}
       {_field("voicevox_url", "VOICEVOX URL", cfg["voicevox_url"])}
       {_field("voicevox_speaker", "VOICEVOX speaker", cfg["voicevox_speaker"], "number")}
+      <label class="checkbox"><input name="stream_tts" type="checkbox"{stream_tts_checked}> 文末ごとに先行して再生する</label>
     </fieldset>
     <fieldset>
       <legend>faces</legend>
@@ -161,6 +163,7 @@ def _flatten_form(raw: bytes) -> dict[str, object]:
     parsed = parse_qs(raw.decode("utf-8"), keep_blank_values=True)
     data = {key: values[-1] for key, values in parsed.items()}
     data["wifi"] = "wifi" in parsed
+    data["stream_tts"] = "stream_tts" in parsed
     data["move_enabled"] = "move_enabled" in parsed
     return data
 

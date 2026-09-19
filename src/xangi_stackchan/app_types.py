@@ -25,6 +25,10 @@ class BridgeConfig:
     stream_timeout: int
     retry_seconds: float
     max_retry_seconds: float
+    # Start synthesis as each completed sentence arrives from xangi instead of
+    # waiting for the complete turn.  It can be disabled for backends where
+    # whole-response playback is preferred.
+    stream_tts: bool = True
     move_enabled: bool = True
     move_idle_yaw: float = 0.0
     move_idle_pitch: float = 5.0

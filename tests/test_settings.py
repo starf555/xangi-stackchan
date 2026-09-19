@@ -75,6 +75,11 @@ def test_merge_config_clamps_volume():
     assert merge_config(_base_config(), {"volume": "128"}).volume == 128
 
 
+def test_merge_config_updates_stream_tts():
+    assert merge_config(_base_config(), {"stream_tts": "false"}).stream_tts is False
+    assert merge_config(_base_config(), {"stream_tts": "true"}).stream_tts is True
+
+
 def test_merge_config_keeps_move_defaults_for_blank_form_values():
     config = merge_config(
         _base_config(),

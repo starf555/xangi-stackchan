@@ -34,6 +34,75 @@ from .tts import (
 DEFAULT_XANGI_URL = "http://127.0.0.1:18888"
 
 
+def take_complete_sentences(text: str) -> tuple[list[str], str]:
+    """Split complete sentence endings from an incremental xangi response.
+
+    Keep an unfinished tail so a delta such as ``"今日は"`` is never spoken
+    before the following delta completes it.  The returned sentences retain
+    their ending punctuation, which helps the TTS produce a natural pause.
+    """
+    sentences: list[str] = []
+    start = 0
+    for index, char in enumerate(text):
+        if char in "。！？!?.":
+            sentence = text[start : index + 1].strip()
+            if sentence:
+                sentences.append(sentence)
+            start = index + 1
+    return sentences, text[start:]
+
+
+class SpeechSequencer:
+    """Run speech jobs in one order-preserving background worker.
+
+    Event delivery must remain free to receive additional ``message.delta``
+    events while the device is synthesizing or playing the previous sentence.
+    A single-worker executor also ensures that AtomS3R's small WAV queue is
+    never fed concurrently.
+    """
+
+    def __init__(
+        self,
+        backend,
+        config: BridgeConfig,
+        piper_process: PiperProcess | None,
+        current_move: list[float | None],
+    ):
+        self._backend = backend
+        self._config = config
+        self._piper_process = piper_process
+        self._current_move = current_move
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stackchan-speech")
+
+    def submit(self, text: str):
+        text = (text or "").strip()
+        if not text:
+            return None
+        return self._executor.submit(self._speak, text)
+
+    def submit_callback(self, callback):
+        return self._executor.submit(callback)
+
+    def close(self):
+        # Waiting keeps Piper alive until a queued synthesize/send operation
+        # has finished, which is safer than closing it underneath a worker.
+        self._executor.shutdown(wait=True, cancel_futures=False)
+
+    def _speak(self, text: str) -> bool:
+        if not self._config.move_enabled or not supports_move(self._backend):
+            return speak_text(self._backend, text, self._config, self._piper_process)
+        with TalkingSway(
+            self._backend,
+            self._config.move_idle_yaw,
+            self._config.move_idle_pitch,
+            self._config.move_talking_sway_yaw,
+            self._config.move_talking_sway_pitch,
+            self._config.move_talking_sway_interval,
+            self._current_move,
+        ):
+            return speak_text(self._backend, text, self._config, self._piper_process)
+
+
 class ConfigChanged(Exception):
     pass
 
@@ -318,15 +387,23 @@ def close_runtime(backend, piper_process, current_face, current_move, config):
 def run_bridge(state: RuntimeState):
     backend = None
     piper_process = None
+    speech: SpeechSequencer | None = None
     current_face: list[str | None] = [None]
     current_move: list[float | None] = [None, None]
     active_version = -1
     active_turn = None
+    turn_epoch = 0
+    active_epoch = 0
+    turn_buffers: dict[str, str] = {}
+    streamed_turns: set[str] = set()
 
     try:
         while True:
             config, version = state.snapshot()
             if version != active_version:
+                if speech:
+                    speech.close()
+                    speech = None
                 close_runtime(backend, piper_process, current_face, current_move, config)
                 state.set_runtime(None, None)
                 backend = open_backend_with_retry(config, xangi_url=config.xangi_url)
@@ -336,6 +413,8 @@ def run_bridge(state: RuntimeState):
                 current_face = [None]
                 current_move = [None, None]
                 active_turn = None
+                turn_buffers = {}
+                streamed_turns = set()
                 active_version = version
                 set_volume(backend, config.volume)
                 set_face_if_needed(backend, config.face_idle, current_face)
@@ -344,6 +423,7 @@ def run_bridge(state: RuntimeState):
                         backend, config.move_idle_yaw, config.move_idle_pitch, current_move
                     )
                 state.set_runtime(backend, piper_process)
+                speech = SpeechSequencer(backend, config, piper_process, current_move)
                 log({"config_applied": version})
 
             stream_url = normalize_xangi_stream_url(config.xangi_url)
@@ -374,6 +454,10 @@ def run_bridge(state: RuntimeState):
 
                         if event_type == "turn.started":
                             active_turn = event.get("turn_id")
+                            turn_epoch += 1
+                            active_epoch = turn_epoch
+                            if active_turn:
+                                turn_buffers[active_turn] = ""
                             # ユーザがファーム LCD 長押しで前 turn を止めた状態
                             # (user_stopped=True) を新 turn 開始でリセット。これで
                             # 次の send_wav から通常動作復帰する。
@@ -391,35 +475,55 @@ def run_bridge(state: RuntimeState):
                         elif event_type == "message.delta":
                             if active_turn == event.get("turn_id"):
                                 set_face_if_needed(backend, config.face_talking, current_face)
+                                if config.stream_tts and speech:
+                                    turn_id = active_turn
+                                    delta = str(event.get("text") or "")
+                                    sentences, tail = take_complete_sentences(
+                                        turn_buffers.get(turn_id, "") + delta
+                                    )
+                                    turn_buffers[turn_id] = tail
+                                    for sentence in sentences:
+                                        speech.submit(sentence)
+                                        streamed_turns.add(turn_id)
+                                        log({"streaming_sentence": sentence})
                         elif event_type == "turn.complete":
+                            turn_id = str(event.get("turn_id") or active_turn or "")
+                            completed_epoch = active_epoch
                             active_turn = None
                             set_face_if_needed(backend, config.face_talking, current_face)
-                            spoke = False
-                            if config.move_enabled:
-                                with TalkingSway(
-                                    backend,
-                                    config.move_idle_yaw,
-                                    config.move_idle_pitch,
-                                    config.move_talking_sway_yaw,
-                                    config.move_talking_sway_pitch,
-                                    config.move_talking_sway_interval,
-                                    current_move,
-                                ):
-                                    spoke = speak_text(
-                                        backend, event.get("text", ""), config, piper_process
-                                    )
-                            else:
-                                spoke = speak_text(backend, event.get("text", ""), config, piper_process)
-                            set_face_if_needed(backend, config.face_idle, current_face)
-                            if config.move_enabled:
-                                set_move_if_needed(
-                                    backend,
-                                    config.move_idle_yaw,
-                                    config.move_idle_pitch,
-                                    current_move,
-                                )
+                            if speech:
+                                if config.stream_tts:
+                                    tail = turn_buffers.pop(turn_id, "").strip()
+                                    if tail:
+                                        speech.submit(tail)
+                                        streamed_turns.add(turn_id)
+                                        log({"streaming_sentence": tail, "final": True})
+                                    elif turn_id not in streamed_turns:
+                                        # Some xangi backends emit only turn.complete.
+                                        speech.submit(str(event.get("text") or ""))
+                                else:
+                                    speech.submit(str(event.get("text") or ""))
+
+                                # This marker is ordered after every sentence of this
+                                # turn.  Do not overwrite a newer turn's thinking face.
+                                def _return_to_idle(epoch=completed_epoch):
+                                    if active_turn is None and active_epoch == epoch:
+                                        set_face_if_needed(backend, config.face_idle, current_face)
+                                        if config.move_enabled:
+                                            set_move_if_needed(
+                                                backend,
+                                                config.move_idle_yaw,
+                                                config.move_idle_pitch,
+                                                current_move,
+                                            )
+
+                                speech.submit_callback(_return_to_idle)
                         elif event_type == "turn.aborted":
                             active_turn = None
+                            turn_epoch += 1
+                            active_epoch = turn_epoch
+                            turn_buffers.clear()
+                            streamed_turns.clear()
                             set_face_if_needed(backend, config.face_idle, current_face)
                             if config.move_enabled:
                                 set_move_if_needed(
@@ -453,6 +557,8 @@ def run_bridge(state: RuntimeState):
     finally:
         config, _ = state.snapshot()
         state.set_runtime(None, None)
+        if speech:
+            speech.close()
         close_runtime(backend, piper_process, current_face, current_move, config)
 
 
@@ -484,6 +590,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stackchan-retry-seconds", type=float, default=3.0)
 
     parser.add_argument("--tts", choices=["piper", "voicevox", "none"], default=DEFAULT_TTS)
+    parser.add_argument(
+        "--stream-tts",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="返答完了を待たず、文末ごとに音声合成・再生する (default: enabled)",
+    )
     parser.add_argument("--piper-bin", default=DEFAULT_PIPER_BIN)
     parser.add_argument("--piper-model", default=DEFAULT_PIPER_MODEL)
     parser.add_argument("--piper-speaker", type=int, default=0)
@@ -561,6 +673,7 @@ def config_from_args(args: argparse.Namespace) -> BridgeConfig:
         stream_timeout=args.stream_timeout,
         retry_seconds=args.retry_seconds,
         max_retry_seconds=args.max_retry_seconds,
+        stream_tts=args.stream_tts,
         move_enabled=args.move_enabled,
         move_idle_yaw=args.move_idle_yaw,
         move_idle_pitch=args.move_idle_pitch,

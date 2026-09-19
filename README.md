@@ -8,7 +8,7 @@
 
 - xangi が考え始めるとデバイスが `doubt` 顔 + 首をかしげる
 - xangi が話し始めると `happy` 顔になる
-- `turn.complete` の最終テキストを piper-plus / VOICEVOX で音声化して再生。再生中は首がささやかに揺れる
+- xangiの応答は文末ごとに piper-plus / VOICEVOX で先行して音声化・再生する。最後まで生成を待たないため、会話の応答開始が早い。`--no-stream-tts` で従来どおり最終テキストをまとめて再生できる
 - 完了後は `neutral` 顔 + idle ポーズに戻る
 - `agent.error` では `sad` 顔 + 首を下げる
 - **カメラスナップショット**: 内蔵 GC0308 カメラで JPEG 撮影 → 設定 UI / API で表示。LLM 連携は将来別 PR で対応

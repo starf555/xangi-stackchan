@@ -337,7 +337,11 @@ def make_handler(state: RuntimeState):
                 self.end_headers()
                 return
             if self.path == "/voice-input":
-                payload = json.loads(raw.decode("utf-8") or "{}")
+                try:
+                    payload = json.loads(raw.decode("utf-8") or "{}")
+                except json.JSONDecodeError:
+                    self._send(400, b"invalid JSON", "text/plain; charset=utf-8")
+                    return
                 text = payload.get("text", "").strip()
                 if not text:
                     self._send(400, b"text required", "text/plain; charset=utf-8")
@@ -347,9 +351,12 @@ def make_handler(state: RuntimeState):
                     resp = requests.post(
                         xangi_url.rstrip("/") + "/api/chat",
                         json={"message": text},
-                        timeout=10,
+                        timeout=(5, 2),
                     )
                     self._send(resp.status_code, resp.content, "application/json; charset=utf-8")
+                except requests.exceptions.ReadTimeout:
+                    # xangi は入力を受け取った後も応答生成を続けるため、受信成功として返す。
+                    self._send(202, b'{"status":"accepted"}', "application/json; charset=utf-8")
                 except Exception as exc:
                     self._send(502, str(exc).encode(), "text/plain; charset=utf-8")
                 return

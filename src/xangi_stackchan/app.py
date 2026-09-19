@@ -1,8 +1,6 @@
 import argparse
 import json
-import os
 import random
-import subprocess
 import threading
 from pathlib import Path
 import sys
@@ -34,10 +32,6 @@ from .tts import (
 
 
 DEFAULT_XANGI_URL = "http://127.0.0.1:18888"
-DISCORD_LOG_CHANNEL_ID = "1543164763855654912"
-XANGI_CLI_JS = Path(
-    os.environ.get("XANGI_CMD_JS", str(Path.home() / "xangi" / "dist" / "cli" / "xangi-cmd.js"))
-)
 
 
 class ConfigChanged(Exception):
@@ -46,36 +40,6 @@ class ConfigChanged(Exception):
 
 def log(payload: dict):
     print(json.dumps(payload, ensure_ascii=False), file=sys.stderr, flush=True)
-
-
-def post_discord_log(message: str):
-    text = (message or "").strip()
-    if not text:
-        return
-
-    def _worker():
-        try:
-            result = subprocess.run(
-                [
-                    "node",
-                    str(XANGI_CLI_JS),
-                    "discord_send",
-                    "--channel",
-                    DISCORD_LOG_CHANNEL_ID,
-                    "--message",
-                    text,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=True,
-            )
-            if result.stdout.strip():
-                log({"discord_log": "sent", "message": text})
-        except Exception as exc:
-            log({"discord_log_error": str(exc), "message": text})
-
-    threading.Thread(target=_worker, daemon=True).start()
 
 
 def supports_move(backend) -> bool:
@@ -287,7 +251,6 @@ def open_backend_with_retry(config: BridgeConfig, xangi_url: str = ""):
             import requests as _req
             def _on_voice_input(text: str):
                 log({"voice_input": text})
-                post_discord_log(f"IN: {text}")
                 try:
                     _req.post(
                         xangi_url.rstrip("/") + "/api/chat",
@@ -301,16 +264,20 @@ def open_backend_with_retry(config: BridgeConfig, xangi_url: str = ""):
             backend.voice_input_callback = _on_voice_input
         try:
             backend.open()
-            try:
-                status = backend.send_command("STATUS")
-                if isinstance(status, dict) and status.get("servo") is False:
-                    backend.supports_move = False
-                else:
+            # AtomS3R はサーボを持たないため、STATUS で首振りを無効化する。
+            # 他の既存プロファイルへは不要な追加コマンドを送らない。
+            if (config.stackchan.device_profile or "") == "atoms3r":
+                try:
+                    status = backend.send_command("STATUS")
+                    backend.supports_move = not (
+                        isinstance(status, dict) and status.get("servo") is False
+                    )
+                    log({"status": status})
+                except Exception as exc:
                     backend.supports_move = True
-                log({"status": status})
-            except Exception as exc:
+                    log({"status_error": str(exc)})
+            else:
                 backend.supports_move = True
-                log({"status_error": str(exc)})
             log({"stackchan": "connected", "wifi": config.stackchan.wifi})
             return backend
         except KeyboardInterrupt:
@@ -425,7 +392,6 @@ def run_bridge(state: RuntimeState):
                                 set_face_if_needed(backend, config.face_talking, current_face)
                         elif event_type == "turn.complete":
                             active_turn = None
-                            post_discord_log(f"Stackchan: {event.get('text', '')}")
                             set_face_if_needed(backend, config.face_talking, current_face)
                             spoke = False
                             if config.move_enabled:

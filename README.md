@@ -58,6 +58,18 @@ uv run xangi-stackchan \
 
 起動すると設定 UI が `http://127.0.0.1:7897/` で立ち上がる。xangi URL / 接続先 / 音量 / TTS / 表情をブラウザから変更でき、保存すると `~/.xangi/xangi-stackchan/config.json` に永続化される。
 
+### 任意: Discordへ会話ログを送る
+
+通常、xangi-stackchan はDiscordへメッセージを送らない。発話入力とスタックチャンの最終応答をDiscordに転記したい場合だけ、送信先チャンネルIDを環境変数で明示して、構造化ログをヘルパーへ渡す。
+
+```bash
+XANGI_DISCORD_CHANNEL_ID=<DiscordチャンネルID> \
+uv run xangi-stackchan --xangi-url http://127.0.0.1:18888 --port /dev/stackchan --tts piper \
+  2> >(python scripts/discord_transcript.py)
+```
+
+この例はBash/Zshのプロセス置換を使う。`xangi-cmd` が別の場所にある場合は、`XANGI_DISCORD_COMMAND` に実行コマンドのパスを指定できる。
+
 ## 複数台で動かす
 
 xangi-stackchan は同じマシンで複数プロセスを並列起動できる (1 プロセス = 1 スタックチャン)。

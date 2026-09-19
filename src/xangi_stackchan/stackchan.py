@@ -274,17 +274,19 @@ class StackchanSerial:
 
         # WAV キュー実装: ファーム (xangi-bridge-0.4+) は WAV キューが満杯なら受信前に
         # `{"status":"error","error":"queue full"}` を返す。再生中のスロットが
-        # 空くまで短く sleep + retry する (キュー 4 slot なので最悪でも 1 chunk
-        # 分の再生時間 = 数秒待てば必ず空く)。リトライ中もシリアル排他は維持。
+        # 空くまで待って再試行する。以前の固定4秒では、長い文や先行する再生がある
+        # 場合に空き待ちを打ち切って音声を捨ててしまっていた。
         try:
-            for attempt in range(8):
+            deadline = time.monotonic() + 35
+            while True:
                 with self._lock:
                     result = self._send_wav_locked(wav_data, chunk_size, chunk_delay)
                 if result.get("status") == "error" and result.get("error") == "queue full":
+                    if time.monotonic() >= deadline:
+                        return {**result, "error": "queue full timeout"}
                     time.sleep(0.5)
                     continue
                 return result
-            return result
         finally:
             # WAV 送信エラー (USB 切断・recv timeout 等) ですぐ skip 解除すると、
             # 再生中のサーボラッシュを引き続き避けたいケースで早すぎる。timer は

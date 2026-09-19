@@ -346,11 +346,16 @@ def make_handler(state: RuntimeState):
                 if not text:
                     self._send(400, b"text required", "text/plain; charset=utf-8")
                     return
-                xangi_url = state.snapshot_dict().get("xangi_url", "http://127.0.0.1:18888")
+                config = state.snapshot_dict()
+                xangi_url = config.get("xangi_url", "http://127.0.0.1:18888")
+                chat_payload = {"message": text}
+                thread_id = config.get("thread_id", "")
+                if thread_id.startswith("web:") and len(thread_id) > len("web:"):
+                    chat_payload["appSessionId"] = thread_id[len("web:"):]
                 try:
                     resp = requests.post(
                         xangi_url.rstrip("/") + "/api/chat",
-                        json={"message": text},
+                        json=chat_payload,
                         timeout=(5, 2),
                     )
                     self._send(resp.status_code, resp.content, "application/json; charset=utf-8")

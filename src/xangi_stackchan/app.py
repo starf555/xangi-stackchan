@@ -254,7 +254,7 @@ def open_backend_with_retry(config: BridgeConfig, xangi_url: str = ""):
                 try:
                     _req.post(
                         xangi_url.rstrip("/") + "/api/chat",
-                        json={"message": text},
+                        json=xangi_chat_payload(text, config.thread_id),
                         timeout=(5, 2),
                     )
                 except _req.exceptions.ReadTimeout:
@@ -290,6 +290,14 @@ def should_handle_event(event: dict, config: BridgeConfig) -> bool:
     if config.thread_id and event.get("thread_id") != config.thread_id:
         return False
     return True
+
+
+def xangi_chat_payload(text: str, thread_id: str) -> dict[str, str]:
+    """Route AtomS3R input to the configured web conversation when available."""
+    payload = {"message": text}
+    if thread_id.startswith("web:") and len(thread_id) > len("web:"):
+        payload["appSessionId"] = thread_id[len("web:"):]
+    return payload
 
 
 def close_runtime(backend, piper_process, current_face, current_move, config):

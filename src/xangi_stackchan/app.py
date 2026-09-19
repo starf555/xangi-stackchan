@@ -264,18 +264,11 @@ def open_backend_with_retry(config: BridgeConfig, xangi_url: str = ""):
             backend.voice_input_callback = _on_voice_input
         try:
             backend.open()
-            # AtomS3R はサーボを持たないため、STATUS で首振りを無効化する。
+            # AtomS3R はサーボを持たない。USB ファームは STATUS コマンドを
+            # 提供しないため、プロファイル指定だけで首振りを無効化する。
             # 他の既存プロファイルへは不要な追加コマンドを送らない。
             if (config.stackchan.device_profile or "") == "atoms3r":
-                try:
-                    status = backend.send_command("STATUS")
-                    backend.supports_move = not (
-                        isinstance(status, dict) and status.get("servo") is False
-                    )
-                    log({"status": status})
-                except Exception as exc:
-                    backend.supports_move = True
-                    log({"status_error": str(exc)})
+                backend.supports_move = False
             else:
                 backend.supports_move = True
             log({"stackchan": "connected", "wifi": config.stackchan.wifi})

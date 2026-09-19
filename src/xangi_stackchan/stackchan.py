@@ -214,15 +214,26 @@ class StackchanSerial:
         with self._lock:
             self.ser.write(f"{cmd}\n".encode())
             self.ser.flush()
-            time.sleep(0.2)
+            # AtomS3R はコマンド応答まで 0.2 秒以上かかることがある。応答が
+            # 到着する前にロックを手放すと、VOICE_INPUT reader が応答行を消費して
+            # しまうため、ここで行末まで待つ。
+            deadline = time.time() + 2
             response = ""
-            while self.ser.in_waiting:
-                line = self.ser.readline().decode("utf-8", errors="replace").strip()
-                if not line:
-                    continue
-                if self._detect_async_event(line):
-                    continue  # 非同期 event はフラグだけ立てて応答とは別扱い
-                response = line
+            buf = b""
+            while time.time() < deadline:
+                avail = self.ser.in_waiting
+                if avail:
+                    buf += self.ser.read(avail)
+                    while b"\n" in buf:
+                        raw_line, buf = buf.split(b"\n", 1)
+                        line = raw_line.decode("utf-8", errors="replace").strip()
+                        if not line or self._detect_async_event(line):
+                            continue
+                        response = line
+                        break
+                    if response:
+                        break
+                time.sleep(0.02)
             try:
                 return json.loads(response)
             except json.JSONDecodeError:
@@ -580,4 +591,3 @@ def create_backend(config: StackchanConfig):
     backend.max_wav_bytes = config.max_wav_bytes
     backend.skip_move_during_wav = config.skip_move_during_wav
     return backend
-

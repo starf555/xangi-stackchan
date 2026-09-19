@@ -63,12 +63,15 @@ uv run xangi-stackchan \
 通常、xangi-stackchan はDiscordへメッセージを送らない。発話入力とスタックチャンの最終応答をDiscordに転記したい場合だけ、送信先チャンネルIDを環境変数で明示して、構造化ログをヘルパーへ渡す。
 
 ```bash
-XANGI_DISCORD_CHANNEL_ID=<DiscordチャンネルID> \
-uv run xangi-stackchan --xangi-url http://127.0.0.1:18888 --port /dev/stackchan --tts piper \
-  2> >(python scripts/discord_transcript.py)
+env \
+  XANGI_TOOL_SERVER="$XANGI_TOOL_SERVER" \
+  XANGI_DISCORD_CHANNEL_ID=<DiscordチャンネルID> \
+  XANGI_DISCORD_COMMAND=/path/to/xangi-cmd \
+  bash -c 'uv run xangi-stackchan --xangi-url http://127.0.0.1:18888 --port /dev/stackchan --tts piper \
+    2> >(python scripts/discord_transcript.py)'
 ```
 
-この例はBash/Zshのプロセス置換を使う。`xangi-cmd` が別の場所にある場合は、`XANGI_DISCORD_COMMAND` に実行コマンドのパスを指定できる。
+この例はBash/Zshのプロセス置換を使う。`xangi-cmd` を使う場合は、xangiを起動したセッションの `XANGI_TOOL_SERVER` を引き継ぐ必要がある。手動ターミナルでは `XANGI_TOOL_SERVER` が空でないことを確認してから起動する。`xangi-cmd` が別の場所にある場合は、`XANGI_DISCORD_COMMAND` に実行コマンドのパスを指定できる。
 
 ## 複数台で動かす
 
